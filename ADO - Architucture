@@ -1,0 +1,275 @@
+# Azure DevOps Pipeline Migration — NEO Planning Assistant
+
+## Table of Contents
+1. [Current State (Ant-based)](#1-current-state-ant-based)
+2. [Target State (Azure ADO)](#2-target-state-azure-ado)
+3. [Pipeline Architecture](#3-pipeline-architecture)
+4. [File Structure](#4-file-structure)
+5. [Variable Groups (ADO Library)](#5-variable-groups-ado-library)
+6. [Agent Pool Requirements](#6-agent-pool-requirements)
+7. [Migration Steps](#7-migration-steps)
+8. [Mapping: Ant Targets → ADO Pipelines](#8-mapping-ant-targets--ado-pipelines)
+9. [Test Results & Lint Reports in ADO](#9-test-results--lint-reports-in-ado)
+10. [Decisions / Open Points](#10-decisions--open-points)
+
+---
+
+## 1. Current State (Ant-based)
+
+The build is orchestrated by **Apache Ant** (`Build/build.xml`).
+Ant calls tools in this order:
+
+```
+Ant
+ ├── CMake          → generates Visual Studio .sln / .vcxproj files
+ ├── MSBuild        → compiles C++ source using those project files
+ ├── Boost.Test     → runs unit tests, writes XML reports to log/
+ └── PC-lint Plus   → runs static analysis, writes reports to construct/LintResults/
+```
+
+### Ant Targets (current)
+
+| Target               | Description                                          |
+|----------------------|------------------------------------------------------|
+| `ci`                 | Clean logs → init → cmake configure → msbuild        |
+| `ci_with_unittest`   | Same as `ci` + run all unit tests                    |
+| `all`                | Full nightly: clean, version bump, build, setup, package, uitest, unittest, commit |
+| `lint`               | Clean → cmake configure → create lint cfg → run lint (PA projects) |
+| `lint.misc.components` | Same as `lint` but for misc/shared components      |
+
+### Projects Covered
+
+**Main build:** `PlanningAssistant.sln` (entire solution)
+
+**Unit test modules (7):**
+- `PlanningAssistant.Test`
+- `PlanningAssistantData.Test`
+- `PlanningAssistantInterfaces.Test`
+- `PlanningAssistantModels.Test`
+- `PlanningAssistantSettings.Test`
+- `DeviceInterfaces.Test`
+- `FemtoPlanningInterfaces.Test`
+
+**Lint — PA projects (8):** `projectNamesToLint.txt`
+```
+DeviceInterfaces, FemtoPlanningInterfaces, PlanningAssistant,
+PlanningAssistantData, PlanningAssistantInterfaces,
+PlanningAssistantModels, PlanningAssistantSettings, PlanningAssistantViews
+```
+
+**Lint — Misc components (9):** `projectNamesToLintMiscComponents.txt`
+```
+CommunicationObjects, ComponentCommunication, DICOMDataTypes,
+DICOMMessageProcessor, LibraryManagement, Logging, LoggingBackend,
+QtUtilities, Serialization
+```
+
+---
+
+## 2. Target State (Azure ADO)
+
+### Key Design Decisions
+
+1. **Keep Ant/CMake/MSBuild as-is** — ADO pipelines are a thin wrapper that call existing Ant targets. This minimises risk and allows gradual migration.
+2. **Separate YAML pipelines per concern** — CI, Nightly, Lint-PA, Lint-Misc are independent pipelines. Easy to trigger, modify, or disable individually.
+3. **Shared step templates** — Repeated steps (cmake configure, msbuild, test run) are extracted into reusable YAML templates under `pipelines/templates/`.
+4. **Variable Groups** — Tool paths and secrets stored in ADO Library → Variable Groups, not hardcoded in YAML.
+5. **Artifact publishing** — Build outputs, test XML, lint reports are published as ADO pipeline artifacts and/or test results.
+
+---
+
+## 3. Pipeline Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Azure DevOps Project                     │
+│                                                             │
+│  ┌──────────────┐  ┌──────────────────┐  ┌──────────────┐  │
+│  │  ci.yml      │  │ ci-unittest.yml  │  │ nightly.yml  │  │
+│  │ (PR / commit)│  │ (PR + tests)     │  │ (scheduled)  │  │
+│  └──────┬───────┘  └────────┬─────────┘  └──────┬───────┘  │
+│         │                   │                    │          │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │            Shared Step Templates                     │   │
+│  │  steps/cmake-configure.yml                           │   │
+│  │  steps/msbuild-compile.yml                           │   │
+│  │  steps/unittest-run.yml                              │   │
+│  │  steps/packaging.yml                                 │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                             │
+│  ┌──────────────────┐  ┌──────────────────────────────┐     │
+│  │  lint.yml        │  │  lint-misc-components.yml    │     │
+│  │  (PA projects)   │  │  (shared components)         │     │
+│  └──────┬───────────┘  └──────────────┬───────────────┘     │
+│         │                             │                      │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  steps/lint-run.yml  (shared lint template)          │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  ADO Library — Variable Groups                       │   │
+│  │  vg-pa-tools      (tool paths)                       │   │
+│  │  vg-pa-build      (build settings)                   │   │
+│  │  vg-pa-svn        (SVN credentials / artefacts URL)  │   │
+│  └──────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 4. File Structure
+
+```
+doc/ADO_Pipeline_Migration/
+│
+├── README.md                          ← this file (architecture & plan)
+│
+└── pipelines/
+    │
+    ├── ci.yml                         ← Pipeline: CI (cmake + build)
+    ├── ci-unittest.yml                ← Pipeline: CI + unit tests
+    ├── nightly.yml                    ← Pipeline: Full nightly build
+    ├── lint.yml                       ← Pipeline: Lint PA projects
+    ├── lint-misc-components.yml       ← Pipeline: Lint misc components
+    │
+    └── templates/
+        ├── steps-cmake-configure.yml  ← Template: CMake configure step
+        ├── steps-msbuild-compile.yml  ← Template: MSBuild compile step
+        ├── steps-unittest-run.yml     ← Template: Run Boost.Test + publish results
+        └── steps-lint-run.yml         ← Template: Create lint cfg + run PC-lint Plus
+```
+
+---
+
+## 5. Variable Groups (ADO Library)
+
+Create these Variable Groups in **ADO → Pipelines → Library** before registering any pipeline.
+
+### `vg-pa-tools`
+| Variable Name                          | Example Value                                                                           | Secret |
+|----------------------------------------|-----------------------------------------------------------------------------------------|--------|
+| `PC_LINT_PLUS_DIR_PATH`               | `D:\tools\PCLint\pclp`                                                                  | No     |
+| `VISUAL_STUDIO_VCVARS_BAT_FULL_PATH`  | `D:\tools\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat`    | No     |
+| `ANT_HOME`                             | `D:\tools\apache-ant-1.10.x`                                                            | No     |
+| `JAVA_HOME`                            | `D:\tools\jdk`                                                                          | No     |
+
+### `vg-pa-build`
+| Variable Name          | Example Value | Description                  |
+|------------------------|---------------|------------------------------|
+| `PROJECT_BUILDTYPE`    | `Release`     | MSBuild configuration        |
+| `BOOSTTEST_LOG_LEVEL`  | `all`         | Boost.Test verbosity         |
+
+### `vg-pa-svn`
+| Variable Name               | Example Value                        | Secret |
+|-----------------------------|--------------------------------------|--------|
+| `SVN_ARTEFACTS_URL`        | `https://svn.example.com/artefacts`  | No     |
+| `SVN_USERNAME`              | `svc-build`                          | No     |
+| `SVN_PASSWORD`              | `***`                                | Yes    |
+
+> **Note:** If migrating from SVN to Git, the `vg-pa-svn` group and all SVN-related steps can be removed. ADO will handle source checkout natively.
+
+---
+
+## 6. Agent Pool Requirements
+
+All pipelines require a **self-hosted Windows agent** with the following software installed:
+
+| Tool                        | Version              | Notes                                             |
+|-----------------------------|----------------------|---------------------------------------------------|
+| Windows OS                  | Windows 10/Server    | 64-bit                                            |
+| Visual Studio               | 2022 (Professional) | Required for MSVC compiler + MSBuild              |
+| CMake                       | ≥ 3.5                | Must be on PATH                                   |
+| Apache Ant                  | ≥ 1.10               | Must be on PATH; needs Java                       |
+| Java (JDK)                  | ≥ 11                 | Required by Ant                                   |
+| Python                      | ≥ 3.x                | Used by `build_externals_compare.py`              |
+| PC-lint Plus                | Current              | Only on agents used for lint pipelines            |
+| Qt                          | Matching project ver | Required for CMake Qt discovery                   |
+| Boost                       | Matching project ver | Required for compilation and unit tests           |
+
+**Suggested pool name:** `pa-windows-build-agents`
+
+---
+
+## 7. Migration Steps
+
+### Phase 1 — Preparation (no code changes)
+- [ ] Create ADO Variable Groups (`vg-pa-tools`, `vg-pa-build`, `vg-pa-svn`)
+- [ ] Set up self-hosted Windows agent pool (`pa-windows-build-agents`)
+- [ ] Install and verify all required tools on agent machine(s)
+- [ ] Ensure SVN checkout / Git clone works on the agent
+- [ ] Copy `pipelines/` folder from this doc into repository root (or a `/.azuredevops/` folder)
+
+### Phase 2 — Register pipelines one by one
+1. **`ci.yml`** — Register first. Verify cmake + msbuild work end-to-end.
+2. **`ci-unittest.yml`** — Add unit test stage. Verify XML reports are published.
+3. **`lint.yml`** — Verify PC-lint Plus runs and reports are attached.
+4. **`lint-misc-components.yml`** — Mirror of lint for misc components.
+5. **`nightly.yml`** — Full nightly last (most complex; includes SVN commit).
+
+### Phase 3 — Trigger policies
+- Set **branch policies** on `main`/`trunk` to require `ci.yml` to pass before merge.
+- Schedule `nightly.yml` with a **cron trigger** (e.g. `0 22 * * 1-5` = weekdays 22:00).
+- Schedule `lint.yml` once or twice per week.
+
+### Phase 4 — Cleanup (optional)
+- Remove Ant/Jenkins job definitions from old build server.
+- Remove `setup.properties` / `local.properties` references and replace with ADO variable groups entirely.
+
+---
+
+## 8. Mapping: Ant Targets → ADO Pipelines
+
+| Old Ant target          | New ADO Pipeline             | Trigger                       |
+|-------------------------|------------------------------|-------------------------------|
+| `ci`                    | `ci.yml`                     | Every commit / PR             |
+| `ci_with_unittest`      | `ci-unittest.yml`            | Every commit on main / PR     |
+| `all` (nightly)         | `nightly.yml`                | Scheduled (nightly cron)      |
+| `lint`                  | `lint.yml`                   | Scheduled or manual           |
+| `lint.misc.components`  | `lint-misc-components.yml`   | Scheduled or manual           |
+
+---
+
+## 9. Test Results & Lint Reports in ADO
+
+### Unit Test Results
+Boost.Test writes XML in JUnit format (`--log_format=XML`).
+ADO can publish and display this natively.
+
+In each pipeline, after running tests, add:
+```yaml
+- task: PublishTestResults@2
+  inputs:
+    testResultsFormat: JUnit
+    testResultsFiles: 'log/*.Test.xml'
+    mergeTestResults: true
+    testRunTitle: 'Unit Tests - $(Build.BuildNumber)'
+  condition: always()   # publish even if tests failed
+```
+
+Result: visible as the **Tests** tab on every pipeline run in ADO.
+
+### PC-lint Plus Reports
+PC-lint Plus writes results to `construct/LintResults/`.
+Publish as pipeline artifacts so they are downloadable from the ADO run page:
+```yaml
+- task: PublishBuildArtifacts@1
+  inputs:
+    pathToPublish: '$(CONSTRUCT_DIR)/LintResults'
+    artifactName: 'LintResults'
+  condition: always()
+```
+
+> **Optional enhancement:** Use the [Warnings Next Generation plugin] pattern — convert PC-lint output to a format that ADO Extensions (e.g. "SARIF SAST Scans Tab") can display inline in the UI.
+
+---
+
+## 10. Decisions / Open Points
+
+| # | Question                                                      | Options                        | Decision |
+|---|---------------------------------------------------------------|--------------------------------|----------|
+| 1 | Keep SVN or migrate to Git (ADO Repos)?                      | SVN / Git                      | TBD      |
+| 2 | Where to store pipeline YAML files?                          | `/pipelines/` or `/.azuredevops/` | TBD   |
+| 3 | Run unit tests in parallel per module?                       | Sequential / Parallel stages   | TBD      |
+| 4 | Lint frequency (per-commit is slow)?                         | Nightly / Weekly / Manual only | TBD      |
+| 5 | Nightly SVN artefact commit — keep or push to ADO Artifacts? | SVN commit / ADO Artifacts     | TBD      |
+| 6 | Separate agent pools for build vs lint?                      | One pool / Two pools           | TBD      |
