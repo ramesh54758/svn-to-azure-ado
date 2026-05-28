@@ -1,0 +1,61 @@
+##svn fetch code supply password 
+cat > /mnt/c/svn-thirdparty/fetch-loop.sh << 'SCRIPT'
+#!/bin/bash
+cd /mnt/c/svn-thirdparty/ThirdParty-git
+
+SVN_USER="x6rgunna"
+SVN_URL="https://gullstrand.zeiss.org/svn/3rdParty/"
+
+read -s -p "Enter SVN password for $SVN_USER: " SVN_PASS
+echo
+
+MAX_RETRIES=999
+ATTEMPT=0
+
+while [ $ATTEMPT -lt $MAX_RETRIES ]; do
+  ATTEMPT=$((ATTEMPT+1))
+  GIT_COUNT=$(git log --oneline refs/remotes/git-svn 2>/dev/null | wc -l)
+  LAST_DATE=$(git log --format="%ai" refs/remotes/git-svn 2>/dev/null | head -1)
+  echo "========================================"
+  echo " Attempt #$ATTEMPT | $(date)"
+  echo " Git commits: $GIT_COUNT | Last: $LAST_DATE"
+  echo "========================================"
+
+  expect << EXPECTEOF
+    set timeout -1
+    spawn git svn fetch
+    expect {
+      -re "Password for.*:" {
+        send "$SVN_PASS\r"
+        exp_continue
+      }
+      -re "Store password.*:" {
+        send "yes\r"
+        exp_continue
+      }
+      -re "Username:" {
+        send "$SVN_USER\r"
+        exp_continue
+      }
+      eof
+    }
+EXPECTEOF
+
+  EXIT_CODE=$?
+  git update-ref refs/heads/master refs/remotes/git-svn 2>/dev/null
+
+  NEW_COUNT=$(git log --oneline refs/remotes/git-svn 2>/dev/null | wc -l)
+  NEW_DATE=$(git log --format="%ai" refs/remotes/git-svn 2>/dev/null | head -1)
+  echo "Commits: $NEW_COUNT | Date: $NEW_DATE"
+
+  if [ $EXIT_CODE -eq 0 ] && [ "$NEW_DATE" \> "2026-01-01" ]; then
+    echo "DONE — SVN 2026 content captured!"
+    break
+  fi
+  echo "Restarting in 10s..."
+  sleep 10
+done
+SCRIPT
+
+chmod +x /mnt/c/svn-thirdparty/fetch-loop.sh
+/mnt/c/svn-thirdparty/fetch-loop.sh
