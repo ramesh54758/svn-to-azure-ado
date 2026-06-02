@@ -117,6 +117,13 @@ Authentication realm: <https://gullstrand.zeiss.org:443> SVN Repositories
 Password for 'x6rgunna': ****************
 
 Revision: 5152
+## If disconnected will retry after 15sec
+cd /mnt/c/svn-thirdparty/ThirdParty-git
+while true; do
+  git svn fetch && echo "DONE!" && break
+  echo "Disconnected. Retrying in 15s..."
+  sleep 15
+done
 
 ### STEP 5 — Clone the SVN repo into Git
 
@@ -186,6 +193,15 @@ git branch -a
 Expected output: commits on `master` branch, `remotes/git-svn` tracking ref.
 
 ---
+### Identify how many remotes done sofor
+ramesh@IN05N001GB:/mnt/c/svn-thirdparty/ThirdParty-git$ git log --oneline refs/remotes/git-svn 2>/dev/null | wc -l
+4319
+### Identify total clones
+ramesh@IN05N001GB:/mnt/c/svn-thirdparty$ svn info https://gullstrand.zeiss.org/svn/3rdParty --username x6rgunna | grep "^Revision:"
+Authentication realm: <https://gullstrand.zeiss.org:443> SVN Repositories
+Password for 'x6rgunna': ****************
+
+Revision: 5152
 
 ### STEP 8 — Add ADO remote and push
 
