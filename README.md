@@ -112,6 +112,11 @@ EOF
 > If `git svn` hits an unknown author during fetch it will abort — add them and re-run.
 
 ---
+ramesh@IN05N001GB:/mnt/c/svn-thirdparty/ThirdParty-git$ svn info https://gullstrand.zeiss.org/svn/3rdParty --username x6rgunna | grep "^Revision:"
+Authentication realm: <https://gullstrand.zeiss.org:443> SVN Repositories
+Password for 'x6rgunna': ****************
+
+Revision: 5152
 
 ### STEP 5 — Clone the SVN repo into Git
 
