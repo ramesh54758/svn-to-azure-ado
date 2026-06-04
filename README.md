@@ -166,15 +166,21 @@ git svn info 2>/dev/null | grep Revision
 
 # Fetch remaining revisions in batches of 500
 # Replace START with (last revision + 1), END with repo's HEAD revision
-START=4002
-END=5150
+START=4320
+END=5152
+BATCH=50
 
-for i in $(seq $START 500 $END); do
-  BATCH_END=$((i + 499))
-  [ $BATCH_END -gt $END ] && BATCH_END=$END
-  echo "=== Fetching r$i:$BATCH_END ==="
-  git svn fetch -r $i:$BATCH_END
+for r in $(seq $START $BATCH $END); do
+  REND=$((r + BATCH - 1))
+  [ $REND -gt $END ] && REND=$END
+  echo "=== Fetching r$r:$REND ==="
+  while true; do
+    git svn fetch -r $r:$REND && break
+    echo "Crashed/disconnected. Retrying in 10s..."
+    sleep 10
+  done
 done
+echo "=== ALL DONE ==="
 ```
 
 > If a batch of 500 still crashes, reduce to batches of 100 or 50.
