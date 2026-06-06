@@ -160,30 +160,36 @@ If `git svn clone` crashes with `error: git-svn died of signal 6`, fetch in batc
 ```bash
 cd "$CLONE_DIR"
 
-# Check how far the clone got
-git svn info 2>/dev/null | grep Revision
-# e.g. "Revision: 4001" means r1-4001 are done
+cd /mnt/c/svn-thirdparty/ThirdParty-git
 
-# Fetch remaining revisions in batches of 500
-# Replace START with (last revision + 1), END with repo's HEAD revision
-START=4320
-END=5152
-BATCH=50
+git config http.postBuffer 524288000
 
-for r in $(seq $START $BATCH $END); do
-  REND=$((r + BATCH - 1))
-  [ $REND -gt $END ] && REND=$END
-  echo "=== Fetching r$r:$REND ==="
-  while true; do
-    git svn fetch -r $r:$REND && break
-    echo "Crashed/disconnected. Retrying in 10s..."
-    sleep 10
-  done
+# Get all commits in order (oldest first)
+COMMITS=$(git rev-list --reverse master)
+TOTAL=$(echo "$COMMITS" | wc -l)
+BATCH=200
+
+echo "Total commits: $TOTAL"
+
+i=0
+for sha in $COMMITS; do
+  i=$((i + 1))
+  if [ $((i % BATCH)) -eq 0 ] || [ $i -eq $TOTAL ]; then
+    echo "=== Pushing commit $i/$TOTAL: $sha ==="
+    git push origin $sha:refs/heads/master --force
+    if [ $? -ne 0 ]; then
+      echo "FAILED at commit $i: $sha"
+      echo "Retrying with smaller batch..."
+      git push origin $sha:refs/heads/master --force
+      if [ $? -ne 0 ]; then
+        echo "Still failing. This commit may be too large."
+        echo "Large files in this commit:"
+        git diff-tree -r --no-commit-id $sha | sort -k4 -n -r | head -5
+        break
+      fi
+    fi
+  fi
 done
-echo "=== ALL DONE ==="
-```
-
-> If a batch of 500 still crashes, reduce to batches of 100 or 50.
 
 ---
 
@@ -244,6 +250,30 @@ git push origin master
 
 > **If a batch fails with auth error:** Run the resume script below.  
 > **If a batch fails with 5 GB size error:** Reduce `BATCH=50` to `BATCH=10` and restart.
+### split and push 
+
+cd /mnt/c/svn-thirdparty/ThirdParty-git
+
+# Resume from commit 601, push every 50 commits instead of 200
+COMMITS=$(git rev-list --reverse master)
+TOTAL=$(echo "$COMMITS" | wc -l)
+BATCH=50
+SKIP=600  # already pushed up to 600
+
+i=0
+for sha in $COMMITS; do
+  i=$((i + 1))
+  [ $i -le $SKIP ] && continue
+  if [ $((i % BATCH)) -eq 0 ] || [ $i -eq $TOTAL ]; then
+    echo "=== Pushing commit $i/$TOTAL: $sha ==="
+    while true; do
+      git push origin $sha:refs/heads/master --force && break
+      echo "Failed. Retrying in 10s..."
+      sleep 10
+    done
+  fi
+done
+echo "=== ALL DONE ==="
 
 ---
 
